@@ -16,9 +16,9 @@ parser = argparse.ArgumentParser()
 
 parser.add_argument('--save_dir', default="output", type=str,
                     help='Where to save the adversarial examples, and other results')
-parser.add_argument('--images_root', default=r"demo\images", type=str,
+parser.add_argument('--images_root', default=r"/home/DiffAttack/demo/images", type=str,
                     help='The clean images root directory')
-parser.add_argument('--label_path', default=r"demo\labels.txt", type=str,
+parser.add_argument('--label_path', default=r"/home/DiffAttack/demo/labels.txt", type=str,
                     help='The clean images labels.txt')
 parser.add_argument('--is_test', default=False, type=bool,
                     help='Whether to test the robustness of the generated adversarial examples')
