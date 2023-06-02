@@ -106,7 +106,7 @@ if __name__ == "__main__":
     ldm_stable.scheduler = DDIMScheduler.from_config(ldm_stable.scheduler.config)
 
     "Attack a subset images"
-    all_images = glob.glob(os.path.join(images_root, "*"))
+    all_images = glob.glob(os.path.join(images_root, "*")) # 获取目录下所有路径并按照较好的规则排序
     all_images = natsorted(all_images, alg=ns.PATH)
 
     adv_images = []
@@ -142,7 +142,7 @@ if __name__ == "__main__":
         sys.exit()
 
     for ind, image_path in enumerate(all_images):
-        tmp_image = Image.open(image_path).convert('RGB')
+        tmp_image = Image.open(image_path).convert('RGB') # .rjust(4, '0') 用于右对齐，左侧填充0
         tmp_image.save(os.path.join(save_dir, str(ind).rjust(4, '0') + "_originImage.png"))
 
         adv_image, clean_acc, adv_acc = run_diffusion_attack(tmp_image, label[ind:ind + 1],
