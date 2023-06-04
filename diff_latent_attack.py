@@ -214,17 +214,20 @@ def diffattack(
         topN=1,
         args=None
 ):
-    label = torch.from_numpy(label).long().cuda()
+    label = torch.from_numpy(label).long().cuda() # 表情605
 
     model.vae.requires_grad_(False)
     model.text_encoder.requires_grad_(False)
     model.unet.requires_grad_(False)
 
+    # 获取代理模型（605）
     classifier = other_attacks.model_selection(model_name).eval()
     classifier.requires_grad_(False)
 
+    # resize后的图像大小
     height = width = res
 
+    # 图像resize + 标准化 + 转换为tensor
     test_image = image.resize((height, height), resample=Image.LANCZOS)
     test_image = np.float32(test_image) / 255.0
     test_image = test_image[:, :, :3]
@@ -233,21 +236,22 @@ def diffattack(
     test_image = test_image.transpose((2, 0, 1))
     test_image = torch.from_numpy(test_image).unsqueeze(0)
 
+    # 代理模型预测（label就是一个长度，为啥要拿准确度呢）
     pred = classifier(test_image.cuda())
     pred_accuracy_clean = (torch.argmax(pred, 1).detach() == label).sum().item() / len(label)
     print("\nAccuracy on benign examples: {}%".format(pred_accuracy_clean * 100))
 
-    logit = torch.nn.Softmax()(pred)
+    logit = torch.nn.Softmax()(pred) # 得到预测的置信度logit
     print("gt_label:", label[0].item(), "pred_label:", torch.argmax(pred, 1).detach().item(), "pred_clean_logit",
           logit[0, label[0]].item())
 
     _, pred_labels = pred.topk(topN, largest=True, sorted=True)
 
     target_prompt = " ".join([imagenet_label.refined_Label[label.item()] for i in range(1, topN)])
-    prompt = [imagenet_label.refined_Label[label.item()] + " " + target_prompt] * 2
+    prompt = [imagenet_label.refined_Label[label.item()] + " " + target_prompt] * 2 # label对应的物体描述（iPod）
     print("prompt generate: ", prompt[0], "\tlabels: ", pred_labels.cpu().numpy().tolist())
 
-    true_label = model.tokenizer.encode(imagenet_label.refined_Label[label.item()])
+    true_label = model.tokenizer.encode(imagenet_label.refined_Label[label.item()]) # 标签编码
     target_label = model.tokenizer.encode(target_prompt)
     print("decoder: ", true_label, target_label)
 
@@ -257,14 +261,14 @@ def diffattack(
             === Details please refer to Appendix B ===
             ==========================================
     """
-    latent, inversion_latents = ddim_reverse_sample(image, prompt, model,
+    latent, inversion_latents = ddim_reverse_sample(image, prompt, model, # 逆向DDIM（加噪）
                                                     num_inference_steps,
                                                     0, res=height)
-    inversion_latents = inversion_latents[::-1]
+    inversion_latents = inversion_latents[::-1] # 逆转latents顺序
 
     init_prompt = [prompt[0]]
     batch_size = len(init_prompt)
-    latent = inversion_latents[start_step - 1]
+    latent = inversion_latents[start_step - 1] # 抽取一个加噪后的latents作为图像生成起始点
 
     """
             ===============================================================================
@@ -273,7 +277,7 @@ def diffattack(
             ===============================================================================
     """
     max_length = 77
-    uncond_input = model.tokenizer(
+    uncond_input = model.tokenizer( # 这是个什么玩意
         [""] * batch_size, padding="max_length", max_length=max_length, return_tensors="pt"
     )
 
@@ -286,10 +290,11 @@ def diffattack(
         truncation=True,
         return_tensors="pt",
     )
-    text_embeddings = model.text_encoder(text_input.input_ids.to(model.device))[0]
+    text_embeddings = model.text_encoder(text_input.input_ids.to(model.device))[0] # 这又是什么玩意
 
+    # 初始化latents，就是更改了一下latent的大小（size），扩展了一下维度
     all_uncond_emb = []
-    latent, latents = init_latent(latent, model, height, width, batch_size)
+    latent, latents = init_latent(latent, model, height, width, batch_size) # latent, latents size相同 latent = size/8
 
     uncond_embeddings.requires_grad_(True)
     optimizer = optim.AdamW([uncond_embeddings], lr=1e-1)
@@ -299,7 +304,7 @@ def diffattack(
 
     #  The DDIM should begin from 1, as the inversion cannot access X_T but only X_{T-1}
     for ind, t in enumerate(tqdm(model.scheduler.timesteps[1 + start_step - 1:], desc="Optimize_uncond_embed")):
-        for _ in range(10 + 2 * ind):
+        for _ in range(10 + 2 * ind): # 迭代优化 k 次
             out_latents = diffusion_step(model, latents, context, t, guidance_scale)
             optimizer.zero_grad()
             loss = loss_func(out_latents, inversion_latents[start_step - 1 + ind + 1])
@@ -355,14 +360,14 @@ def diffattack(
         init_mask = torch.ones([1, 1, *init_image.shape[-2:]]).cuda()
 
     pbar = tqdm(range(iterations), desc="Iterations")
-    for _, _ in enumerate(pbar):
+    for _, _ in enumerate(pbar): # attack iter
         controller.loss = 0
 
         #  The DDIM should begin from 1, as the inversion cannot access X_T but only X_{T-1}
         controller.reset()
-        latents = torch.cat([original_latent, latent])
+        latents = torch.cat([original_latent, latent]) # [2 4 28 28]
         for ind, t in enumerate(model.scheduler.timesteps[1 + start_step - 1:]):
-            latents = diffusion_step(model, latents, context[ind], t, guidance_scale)
+            latents = diffusion_step(model, latents, context[ind], t, guidance_scale) # 去噪
 
         before_attention_map = aggregate_attention(prompt, controller, 7, ("up", "down"), True, 0, is_cpu=False)
         after_attention_map = aggregate_attention(prompt, controller, 7, ("up", "down"), True, 1, is_cpu=False)
@@ -420,7 +425,7 @@ def diffattack(
             latents = diffusion_step(model, latents, context[ind], t, guidance_scale)
 
     out_image = model.vae.decode(1 / 0.18215 * latents.detach())['sample'][1:] * init_mask + (
-            1 - init_mask) * init_image
+            1 - init_mask) * init_image # 图像解码
     out_image = (out_image / 2 + 0.5).clamp(0, 1)
     out_image = out_image.permute(0, 2, 3, 1)
     mean = torch.as_tensor([0.485, 0.456, 0.406], dtype=out_image.dtype, device=out_image.device)
@@ -443,11 +448,11 @@ def diffattack(
             ==========================================
     """
 
-    image = latent2image(model.vae, latents.detach())
+    image = latent2image(model.vae, latents.detach()) # image from latents
 
-    real = (init_image / 2 + 0.5).clamp(0, 1).permute(0, 2, 3, 1).cpu().numpy()
+    real = (init_image / 2 + 0.5).clamp(0, 1).permute(0, 2, 3, 1).cpu().numpy() # real iamge
     perturbed = image[1:].astype(np.float32) / 255 * init_mask.squeeze().unsqueeze(-1).cpu().numpy() + (
-            1 - init_mask.squeeze().unsqueeze(-1).cpu().numpy()) * real
+            1 - init_mask.squeeze().unsqueeze(-1).cpu().numpy()) * real # 要通过mask只保留某个区域的扰动
     image = (perturbed * 255).astype(np.uint8)
     view_images(np.concatenate([real, perturbed]) * 255, show=False,
                 save_path=save_path + "_diff_{}_image_{}.png".format(model_name,
