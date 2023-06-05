@@ -62,8 +62,10 @@ seed_torch(42)
 def run_diffusion_attack(image, label, diffusion_model, diffusion_steps, guidance=2.5,
                          self_replace_steps=1., save_dir=r"C:\Users\PC\Desktop\output", res=224,
                          model_name="inception", start_step=15, iterations=30, args=None):
+    # 1. 获取控制器
     controller = AttentionControlEdit(diffusion_steps, self_replace_steps)
 
+    # 2. 获取对抗样本
     adv_image, clean_acc, adv_acc = diff_latent_attack.diffattack(diffusion_model, label, controller,
                                                                   num_inference_steps=diffusion_steps,
                                                                   guidance_scale=guidance,
@@ -102,9 +104,11 @@ if __name__ == "__main__":
     # Change the path to "stabilityai/stable-diffusion-2-base" if you want to use the pretrained model.
     pretrained_diffusion_path = args.pretrained_diffusion_path
 
+    # 1. 加载默认的 stable 扩撒模型
     ldm_stable = StableDiffusionPipeline.from_pretrained(pretrained_diffusion_path).to('cuda:0')
     ldm_stable.scheduler = DDIMScheduler.from_config(ldm_stable.scheduler.config)
-
+    
+    # 2. 加载图像
     "Attack a subset images"
     all_images = glob.glob(os.path.join(images_root, "*")) # 获取目录下所有路径并按照较好的规则排序
     all_images = natsorted(all_images, alg=ns.PATH)
@@ -141,10 +145,13 @@ if __name__ == "__main__":
 
         sys.exit()
 
+    # 3. 迭代所有图像
     for ind, image_path in enumerate(all_images):
+        # 3.1 获取原始图像
         tmp_image = Image.open(image_path).convert('RGB') # .rjust(4, '0') 用于右对齐，左侧填充0
         tmp_image.save(os.path.join(save_dir, str(ind).rjust(4, '0') + "_originImage.png"))
 
+        # 3.2 获取对抗图像、攻击成功率
         adv_image, clean_acc, adv_acc = run_diffusion_attack(tmp_image, label[ind:ind + 1],
                                                              ldm_stable,
                                                              diffusion_steps, guidance=guidance,
@@ -153,6 +160,8 @@ if __name__ == "__main__":
                                                              iterations=iterations,
                                                              save_dir=os.path.join(save_dir,
                                                                                    str(ind).rjust(4, '0')), args=args)
+
+        # 3.3 图像格式转换
         adv_image = adv_image.astype(np.float32) / 255.0
         adv_images.append(adv_image[None].transpose(0, 3, 1, 2))
 
