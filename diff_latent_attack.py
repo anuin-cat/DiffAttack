@@ -35,13 +35,19 @@ def ddim_reverse_sample(image, prompt, model, num_inference_steps: int = 20, gui
             ==========================================
     """
     batch_size = 1
-
     max_length = 77
+
+    # 1. 获取无条件文本生成任务的输入嵌入
+
+    # 1.1 使用分词器对空字符串进行处理，生成用于无条件文本生成任务的输入（和.encode输出内容相同，就多了一个mask）
+    #     pt表示pytorch，返回tensor格式数据
     uncond_input = model.tokenizer(
         [""] * batch_size, padding="max_length", max_length=max_length, return_tensors="pt"
     )
+    # 1.2 将无条件文本生成任务的输入文本序列传递给文本编码器，获取其嵌入表示
     uncond_embeddings = model.text_encoder(uncond_input.input_ids.to(model.device))[0]
 
+    # 2. 获取有条件文本生成任务的输入嵌入
     text_input = model.tokenizer(
         prompt[0],
         padding="max_length",
@@ -56,6 +62,7 @@ def ddim_reverse_sample(image, prompt, model, num_inference_steps: int = 20, gui
 
     model.scheduler.set_timesteps(num_inference_steps)
 
+    # 3. 获取图像的嵌入表示（vae.decode）
     latents = encoder(image, model, res=res)
     timesteps = model.scheduler.timesteps.flip(0)
 
@@ -64,17 +71,19 @@ def ddim_reverse_sample(image, prompt, model, num_inference_steps: int = 20, gui
     #  Not inverse the last step, as the alpha_bar_next will be set to 0 which is not aligned to its real value (~0.003)
     #  and this will lead to a bad result.
     for t in tqdm(timesteps[:-1], desc="DDIM_inverse"):
-        latents_input = torch.cat([latents] * 2)
+        latents_input = torch.cat([latents] * 2) # 因为context有两个，所以这里也要有两个，后边还要将其切分开
         noise_pred = model.unet(latents_input, t, encoder_hidden_states=context)["sample"]
 
-        noise_pred_uncond, noise_prediction_text = noise_pred.chunk(2)
-        noise_pred = noise_pred_uncond + guidance_scale * (noise_prediction_text - noise_pred_uncond)
+        noise_pred_uncond, noise_prediction_text = noise_pred.chunk(2) # 从维度0切分成两个tensor
+        noise_pred = noise_pred_uncond + guidance_scale * (noise_prediction_text - noise_pred_uncond) # 某种优化操作
 
+        # 训练一共 n 步，推理我要求 k 步就推理完，所以每次推进的步数是 n/k 才符合训练的目的
         next_timestep = t + model.scheduler.config.num_train_timesteps // model.scheduler.num_inference_steps
         alpha_bar_next = model.scheduler.alphas_cumprod[next_timestep] \
-            if next_timestep <= model.scheduler.config.num_train_timesteps else torch.tensor(0.0)
+            if next_timestep <= model.scheduler.config.num_train_timesteps else torch.tensor(0.0) # alphas_cumprod就是alpha_bar
+            
 
-        "leverage reversed_x0"
+        "leverage reversed_x0" # 其实就是那个公式
         reverse_x0 = (1 / torch.sqrt(model.scheduler.alphas_cumprod[t]) * (
                 latents - noise_pred * torch.sqrt(1 - model.scheduler.alphas_cumprod[t])))
 
@@ -220,14 +229,14 @@ def diffattack(
     model.text_encoder.requires_grad_(False)
     model.unet.requires_grad_(False)
 
-    # 获取代理模型（605）
+    # 1. 获取代理模型（605）
     classifier = other_attacks.model_selection(model_name).eval()
     classifier.requires_grad_(False)
 
     # resize后的图像大小
     height = width = res
 
-    # 图像resize + 标准化 + 转换为tensor
+    # 2. 图像resize + 标准化 + 转换为tensor
     test_image = image.resize((height, height), resample=Image.LANCZOS)
     test_image = np.float32(test_image) / 255.0
     test_image = test_image[:, :, :3]
@@ -236,7 +245,7 @@ def diffattack(
     test_image = test_image.transpose((2, 0, 1))
     test_image = torch.from_numpy(test_image).unsqueeze(0)
 
-    # 代理模型预测（label就是一个长度，为啥要拿准确度呢）
+    # 3. 代理模型预测（label就是一个长度，为啥要拿准确度呢）
     pred = classifier(test_image.cuda())
     pred_accuracy_clean = (torch.argmax(pred, 1).detach() == label).sum().item() / len(label)
     print("\nAccuracy on benign examples: {}%".format(pred_accuracy_clean * 100))
@@ -251,6 +260,8 @@ def diffattack(
     prompt = [imagenet_label.refined_Label[label.item()] + " " + target_prompt] * 2 # label对应的物体描述（iPod）
     print("prompt generate: ", prompt[0], "\tlabels: ", pred_labels.cpu().numpy().tolist())
 
+    # 4. 获取标签文本编码（编码是确定的，不可训练的，能够恢复原始语言的）
+    #    而嵌入（embedding）则是会损失信息的，可训练的，不确定的内容，常见的有 Word2Vec、GloVe、BERT
     true_label = model.tokenizer.encode(imagenet_label.refined_Label[label.item()]) # 标签编码
     target_label = model.tokenizer.encode(target_prompt)
     print("decoder: ", true_label, target_label)
