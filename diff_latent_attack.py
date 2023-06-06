@@ -33,6 +33,10 @@ def ddim_reverse_sample(image, prompt, model, num_inference_steps: int = 20, gui
             ==========================================
             ============ DDIM Inversion ==============
             ==========================================
+
+            其实就是完整的实现一次DDIM的逆向过程, 然后将逆向过程所有步的latent存起来放到latents
+            逆过程的每一步中都插入了text的embeding (而且还是两个, 第一个是空的prompt, 第二个是真实prompt)
+            
     """
     batch_size = 1
     max_length = 77
@@ -92,7 +96,7 @@ def ddim_reverse_sample(image, prompt, model, num_inference_steps: int = 20, gui
         all_latents.append(latents)
 
     #  all_latents[N] -> N: DDIM steps  (X_{T-1} ~ X_0)
-    return latents, all_latents
+    return latents, all_latents # 迭代最后一步的latents以及中间去噪的所有latents
 
 
 def register_attention_control(model, controller):
@@ -272,6 +276,9 @@ def diffattack(
             === Details please refer to Appendix B ===
             ==========================================
     """
+    # 5. 通过DDIM获取图像到噪声的 n 步的加噪过程（就是逆向过程）
+    #    latent是加噪的最后一步得到的噪声潜空间，inversion_latents是所有噪声潜空间的集合
+    #    潜空间指的是通过vae.decode将图像降采样到一个潜空间
     latent, inversion_latents = ddim_reverse_sample(image, prompt, model, # 逆向DDIM（加噪）
                                                     num_inference_steps,
                                                     0, res=height)
@@ -280,6 +287,7 @@ def diffattack(
     init_prompt = [prompt[0]]
     batch_size = len(init_prompt)
     latent = inversion_latents[start_step - 1] # 抽取一个加噪后的latents作为图像生成起始点
+    # inversion_latents[0] 是纯噪声端 inversion_latents[-1]是原图端
 
     """
             ===============================================================================
@@ -287,13 +295,15 @@ def diffattack(
             ======================= Details please refer to Section 3.4 ===================
             ===============================================================================
     """
+
+    # 6. 将空文本（无条件）编码为token然后再嵌入为embedding
     max_length = 77
     uncond_input = model.tokenizer( # 这是个什么玩意
         [""] * batch_size, padding="max_length", max_length=max_length, return_tensors="pt"
     )
-
     uncond_embeddings = model.text_encoder(uncond_input.input_ids.to(model.device))[0]
 
+    # 6. 将prompt 目标标签 编码为token然后再嵌入为embedding
     text_input = model.tokenizer(
         init_prompt,
         padding="max_length",
@@ -314,6 +324,7 @@ def diffattack(
     context = torch.cat([uncond_embeddings, text_embeddings])
 
     #  The DDIM should begin from 1, as the inversion cannot access X_T but only X_{T-1}
+    # 7. 通过更新 uncond_embeddings 来确保拼合以后的 context 能够达成和 text_embeddings 类似的指导效果
     for ind, t in enumerate(tqdm(model.scheduler.timesteps[1 + start_step - 1:], desc="Optimize_uncond_embed")):
         for _ in range(10 + 2 * ind): # 迭代优化 k 次
             out_latents = diffusion_step(model, latents, context, t, guidance_scale)
@@ -326,8 +337,8 @@ def diffattack(
             context = torch.cat(context)
 
         with torch.no_grad():
-            latents = diffusion_step(model, latents, context, t, guidance_scale).detach()
-            all_uncond_emb.append(uncond_embeddings.detach().clone())
+            latents = diffusion_step(model, latents, context, t, guidance_scale).detach() # 推进latents去噪一步（新方法）
+            all_uncond_emb.append(uncond_embeddings.detach().clone()) # 将优化过程中所有uncond_embedding保存下来
 
     """
             ==========================================
@@ -341,7 +352,7 @@ def diffattack(
     register_attention_control(model, controller)
 
     batch_size = len(prompt)
-
+    # 8. 
     text_input = model.tokenizer(
         prompt,
         padding="max_length",
@@ -376,7 +387,7 @@ def diffattack(
 
         #  The DDIM should begin from 1, as the inversion cannot access X_T but only X_{T-1}
         controller.reset()
-        latents = torch.cat([original_latent, latent]) # [2 4 28 28]
+        latents = torch.cat([original_latent, latent]) # [2 4 28 28] original_latent = latent.clone()
         for ind, t in enumerate(model.scheduler.timesteps[1 + start_step - 1:]):
             latents = diffusion_step(model, latents, context[ind], t, guidance_scale) # 去噪
 
@@ -424,7 +435,7 @@ def diffattack(
 
         optimizer.zero_grad()
         loss.backward()
-        optimizer.step()
+        optimizer.step() # 优化latent
 
     with torch.no_grad():
         controller.loss = 0
