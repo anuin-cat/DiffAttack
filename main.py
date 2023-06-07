@@ -14,7 +14,7 @@ import argparse
 
 parser = argparse.ArgumentParser()
 
-parser.add_argument('--save_dir', default="output", type=str,
+parser.add_argument('--save_dir', default="/home/DiffAttack/output", type=str,
                     help='Where to save the adversarial examples, and other results')
 parser.add_argument('--images_root', default=r"/home/DiffAttack/demo/images", type=str,
                     help='The clean images root directory')

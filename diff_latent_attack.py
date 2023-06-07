@@ -126,10 +126,11 @@ def register_attention_control(model, controller):
         return forward
 
     def register_recr(net_, count, place_in_unet):
+        # place_in_unet 表示 上采样up、下采样down、中间层mid
         if net_.__class__.__name__ == 'CrossAttention':
-            net_.forward = ca_forward(net_, place_in_unet)
+            net_.forward = ca_forward(net_, place_in_unet) # 将 CrossAttention 层的正向传播更改为 ca_forward 内定义的函数
             return count + 1
-        elif hasattr(net_, 'children'):
+        elif hasattr(net_, 'children'): # 递归查询子网络中是否有 CrossAttention 并注册
             for net__ in net_.children():
                 count = register_recr(net__, count, place_in_unet)
         return count
@@ -345,6 +346,8 @@ def diffattack(
             ============ Latents Attack ==============
             ==== Details please refer to Section 3 ===
             ==========================================
+
+            这里的目标就是对latent进行优化, 让其去噪以后具备攻击能力
     """
 
     uncond_embeddings.requires_grad_(False)
@@ -352,7 +355,7 @@ def diffattack(
     register_attention_control(model, controller)
 
     batch_size = len(prompt)
-    # 8. 
+    # 8. 将 prompt 编码为 token 并获取其 embedding
     text_input = model.tokenizer(
         prompt,
         padding="max_length",
@@ -362,13 +365,15 @@ def diffattack(
     )
     text_embeddings = model.text_encoder(text_input.input_ids.to(model.device))[0]
 
+    # 9. 拼接 embedding
     context = [[torch.cat([all_uncond_emb[i]] * batch_size), text_embeddings] for i in range(len(all_uncond_emb))]
     context = [torch.cat(i) for i in context]
 
     original_latent = latent.clone()
 
-    latent.requires_grad_(True)
+    latent.requires_grad_(True) # 
 
+    # 10. 设置 latent 的优化器以及损失函数
     optimizer = optim.AdamW([latent], lr=1e-2)
     cross_entro = torch.nn.CrossEntropyLoss()
     init_image = preprocess(image, res)
@@ -389,8 +394,9 @@ def diffattack(
         controller.reset()
         latents = torch.cat([original_latent, latent]) # [2 4 28 28] original_latent = latent.clone()
         for ind, t in enumerate(model.scheduler.timesteps[1 + start_step - 1:]):
-            latents = diffusion_step(model, latents, context[ind], t, guidance_scale) # 去噪
+            latents = diffusion_step(model, latents, context[ind], t, guidance_scale) # 经典的 DDIM 去噪
 
+        # aggregate：总；获取总注意力图 map before和after表示 [0] [1]
         before_attention_map = aggregate_attention(prompt, controller, 7, ("up", "down"), True, 0, is_cpu=False)
         after_attention_map = aggregate_attention(prompt, controller, 7, ("up", "down"), True, 1, is_cpu=False)
 
@@ -441,8 +447,9 @@ def diffattack(
         controller.loss = 0
         controller.reset()
 
-        latents = torch.cat([original_latent, latent])
+        latents = torch.cat([original_latent, latent]) # 原始 latent 和攻击优化后的 latent
 
+        # 通过优化后的 latent 生成图片 其中 original_latent 的加入是一个技巧
         for ind, t in enumerate(model.scheduler.timesteps[1 + start_step - 1:]):
             latents = diffusion_step(model, latents, context[ind], t, guidance_scale)
 
@@ -470,7 +477,7 @@ def diffattack(
             ==========================================
     """
 
-    image = latent2image(model.vae, latents.detach()) # image from latents
+    image = latent2image(model.vae, latents.detach()) # image from latents（simple of the up code）
 
     real = (init_image / 2 + 0.5).clamp(0, 1).permute(0, 2, 3, 1).cpu().numpy() # real iamge
     perturbed = image[1:].astype(np.float32) / 255 * init_mask.squeeze().unsqueeze(-1).cpu().numpy() + (

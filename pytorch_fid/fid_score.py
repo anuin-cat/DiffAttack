@@ -66,7 +66,7 @@ parser.add_argument('--dims', type=int, default=2048,
 parser.add_argument('--save-stats', action='store_true',
                     help=('Generate an npz archive from a directory of samples. '
                           'The first path is used as input and the second as output.'))
-parser.add_argument('--path', type=str, nargs=2, default=[r"C:\Users\PC\Desktop\output", r"pytorch_fid\imagenet.npz"],
+parser.add_argument('--path', type=str, nargs=2, default=[r"/home/DiffAttack/output", r"/home/DiffAttack/pytorch_fid/imagenet.npz"],
                     help=('Paths to the generated images or '
                           'to .npz statistic files'))
 
@@ -238,7 +238,7 @@ def compute_statistics_of_path(path, model, batch_size, dims, device,
             m, s = f['mu'][:], f['sigma'][:]
     else:
         import glob
-        path = glob.glob(path + r"\**\*adv_image*", recursive=True)
+        path = glob.glob(path + r"/**/*adv_image*", recursive=True)
         files = sorted(path)
         m, s = calculate_activation_statistics(files, model, batch_size,
                                                dims, device, num_workers)
