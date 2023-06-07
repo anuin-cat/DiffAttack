@@ -20,7 +20,7 @@ parser.add_argument('--images_root', default=r"/home/DiffAttack/demo/images", ty
                     help='The clean images root directory')
 parser.add_argument('--label_path', default=r"/home/DiffAttack/demo/labels.txt", type=str,
                     help='The clean images labels.txt')
-parser.add_argument('--is_test', default=False, type=bool,
+parser.add_argument('--is_test', default=True, type=bool,
                     help='Whether to test the robustness of the generated adversarial examples')
 parser.add_argument('--pretrained_diffusion_path',
                     default=r"stabilityai/stable-diffusion-2-base",
@@ -31,7 +31,7 @@ parser.add_argument('--diffusion_steps', default=20, type=int, help='Total DDIM 
 parser.add_argument('--start_step', default=15, type=int, help='Which DDIM step to start the attack')
 parser.add_argument('--iterations', default=30, type=int, help='Iterations of optimizing the adv_image')
 parser.add_argument('--res', default=224, type=int, help='Input image resized resolution')
-parser.add_argument('--model_name', default="inception", type=str,
+parser.add_argument('--model_name', default="resnet50", type=str,
                     help='The surrogate model from which the adversarial examples are crafted')
 parser.add_argument('--is_apply_mask', default=False, type=bool,
                     help='Whether to leverage pseudo mask for better imperceptibility (See Appendix D)')
@@ -119,8 +119,8 @@ if __name__ == "__main__":
     adv_all_acc = 0
 
     if is_test:
-        all_clean_images = glob.glob(os.path.join(images_root, "*originImage*"))
-        all_adv_images = glob.glob(os.path.join(images_root, "*adv_image*"))
+        all_clean_images = glob.glob(os.path.join(save_dir, "*originImage*"))
+        all_adv_images = glob.glob(os.path.join(save_dir, "*adv_image*"))
         for image_path, adv_image_path in zip(all_clean_images, all_adv_images):
             tmp_image = Image.open(image_path).convert('RGB')
             tmp_image = tmp_image.resize((res, res), resample=Image.LANCZOS)
@@ -141,7 +141,8 @@ if __name__ == "__main__":
                 Test the robustness of the generated adversarial examples across a variety of normally trained models or
                 adversarially trained models.
         """
-        model_transfer(images, adv_images, label, res, save_path=save_dir, fid_path=images_root)
+        # model_transfer(images, adv_images, label, res, save_path=save_dir, fid_path=images_root)
+        model_transfer(images, adv_images, label, res, save_path=save_dir)
 
         sys.exit()
 

@@ -220,7 +220,7 @@ def diffattack(
         guidance_scale: float = 2.5,
         image=None,
         model_name="inception",
-        save_path=r"C:\Users\PC\Desktop\output",
+        save_path=r"/home/DiffAttack/output",
         res=224,
         start_step=15,
         iterations=30,
