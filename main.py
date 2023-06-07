@@ -60,7 +60,7 @@ seed_torch(42)
 
 
 def run_diffusion_attack(image, label, diffusion_model, diffusion_steps, guidance=2.5,
-                         self_replace_steps=1., save_dir=r"C:\Users\PC\Desktop\output", res=224,
+                         self_replace_steps=1., save_dir=r"/home/DiffAttack/output", res=224,
                          model_name="inception", start_step=15, iterations=30, args=None):
     # 1. 获取控制器
     controller = AttentionControlEdit(diffusion_steps, self_replace_steps)
