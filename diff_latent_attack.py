@@ -33,15 +33,25 @@ def ddim_reverse_sample(image, prompt, model, num_inference_steps: int = 20, gui
             ==========================================
             ============ DDIM Inversion ==============
             ==========================================
+
+            其实就是完整的实现一次DDIM的逆向过程, 然后将逆向过程所有步的latent存起来放到latents
+            逆过程的每一步中都插入了text的embeding (而且还是两个, 第一个是空的prompt, 第二个是真实prompt)
+            
     """
     batch_size = 1
-
     max_length = 77
+
+    # 1. 获取无条件文本生成任务的输入嵌入
+
+    # 1.1 使用分词器对空字符串进行处理，生成用于无条件文本生成任务的输入（和.encode输出内容相同，就多了一个mask）
+    #     pt表示pytorch，返回tensor格式数据
     uncond_input = model.tokenizer(
         [""] * batch_size, padding="max_length", max_length=max_length, return_tensors="pt"
     )
+    # 1.2 将无条件文本生成任务的输入文本序列传递给文本编码器，获取其嵌入表示
     uncond_embeddings = model.text_encoder(uncond_input.input_ids.to(model.device))[0]
 
+    # 2. 获取有条件文本生成任务的输入嵌入
     text_input = model.tokenizer(
         prompt[0],
         padding="max_length",
@@ -56,6 +66,7 @@ def ddim_reverse_sample(image, prompt, model, num_inference_steps: int = 20, gui
 
     model.scheduler.set_timesteps(num_inference_steps)
 
+    # 3. 获取图像的嵌入表示（vae.decode）
     latents = encoder(image, model, res=res)
     timesteps = model.scheduler.timesteps.flip(0)
 
@@ -64,17 +75,19 @@ def ddim_reverse_sample(image, prompt, model, num_inference_steps: int = 20, gui
     #  Not inverse the last step, as the alpha_bar_next will be set to 0 which is not aligned to its real value (~0.003)
     #  and this will lead to a bad result.
     for t in tqdm(timesteps[:-1], desc="DDIM_inverse"):
-        latents_input = torch.cat([latents] * 2)
+        latents_input = torch.cat([latents] * 2) # 因为context有两个，所以这里也要有两个，后边还要将其切分开
         noise_pred = model.unet(latents_input, t, encoder_hidden_states=context)["sample"]
 
-        noise_pred_uncond, noise_prediction_text = noise_pred.chunk(2)
-        noise_pred = noise_pred_uncond + guidance_scale * (noise_prediction_text - noise_pred_uncond)
+        noise_pred_uncond, noise_prediction_text = noise_pred.chunk(2) # 从维度0切分成两个tensor
+        noise_pred = noise_pred_uncond + guidance_scale * (noise_prediction_text - noise_pred_uncond) # 某种优化操作
 
+        # 训练一共 n 步，推理我要求 k 步就推理完，所以每次推进的步数是 n/k 才符合训练的目的
         next_timestep = t + model.scheduler.config.num_train_timesteps // model.scheduler.num_inference_steps
         alpha_bar_next = model.scheduler.alphas_cumprod[next_timestep] \
-            if next_timestep <= model.scheduler.config.num_train_timesteps else torch.tensor(0.0)
+            if next_timestep <= model.scheduler.config.num_train_timesteps else torch.tensor(0.0) # alphas_cumprod就是alpha_bar
+            
 
-        "leverage reversed_x0"
+        "leverage reversed_x0" # 其实就是那个公式
         reverse_x0 = (1 / torch.sqrt(model.scheduler.alphas_cumprod[t]) * (
                 latents - noise_pred * torch.sqrt(1 - model.scheduler.alphas_cumprod[t])))
 
@@ -83,7 +96,7 @@ def ddim_reverse_sample(image, prompt, model, num_inference_steps: int = 20, gui
         all_latents.append(latents)
 
     #  all_latents[N] -> N: DDIM steps  (X_{T-1} ~ X_0)
-    return latents, all_latents
+    return latents, all_latents # 迭代最后一步的latents以及中间去噪的所有latents
 
 
 def register_attention_control(model, controller):
@@ -113,10 +126,11 @@ def register_attention_control(model, controller):
         return forward
 
     def register_recr(net_, count, place_in_unet):
+        # place_in_unet 表示 上采样up、下采样down、中间层mid
         if net_.__class__.__name__ == 'CrossAttention':
-            net_.forward = ca_forward(net_, place_in_unet)
+            net_.forward = ca_forward(net_, place_in_unet) # 将 CrossAttention 层的正向传播更改为 ca_forward 内定义的函数
             return count + 1
-        elif hasattr(net_, 'children'):
+        elif hasattr(net_, 'children'): # 递归查询子网络中是否有 CrossAttention 并注册
             for net__ in net_.children():
                 count = register_recr(net__, count, place_in_unet)
         return count
@@ -206,7 +220,7 @@ def diffattack(
         guidance_scale: float = 2.5,
         image=None,
         model_name="inception",
-        save_path=r"C:\Users\PC\Desktop\output",
+        save_path=r"/home/DiffAttack/output",
         res=224,
         start_step=15,
         iterations=30,
@@ -214,17 +228,20 @@ def diffattack(
         topN=1,
         args=None
 ):
-    label = torch.from_numpy(label).long().cuda()
+    label = torch.from_numpy(label).long().cuda() # 表情605
 
     model.vae.requires_grad_(False)
     model.text_encoder.requires_grad_(False)
     model.unet.requires_grad_(False)
 
+    # 1. 获取代理模型（605）
     classifier = other_attacks.model_selection(model_name).eval()
     classifier.requires_grad_(False)
 
+    # resize后的图像大小
     height = width = res
 
+    # 2. 图像resize + 标准化 + 转换为tensor
     test_image = image.resize((height, height), resample=Image.LANCZOS)
     test_image = np.float32(test_image) / 255.0
     test_image = test_image[:, :, :3]
@@ -233,21 +250,24 @@ def diffattack(
     test_image = test_image.transpose((2, 0, 1))
     test_image = torch.from_numpy(test_image).unsqueeze(0)
 
+    # 3. 代理模型预测（label就是一个长度，为啥要拿准确度呢）
     pred = classifier(test_image.cuda())
     pred_accuracy_clean = (torch.argmax(pred, 1).detach() == label).sum().item() / len(label)
     print("\nAccuracy on benign examples: {}%".format(pred_accuracy_clean * 100))
 
-    logit = torch.nn.Softmax()(pred)
+    logit = torch.nn.Softmax()(pred) # 得到预测的置信度logit
     print("gt_label:", label[0].item(), "pred_label:", torch.argmax(pred, 1).detach().item(), "pred_clean_logit",
           logit[0, label[0]].item())
 
     _, pred_labels = pred.topk(topN, largest=True, sorted=True)
 
     target_prompt = " ".join([imagenet_label.refined_Label[label.item()] for i in range(1, topN)])
-    prompt = [imagenet_label.refined_Label[label.item()] + " " + target_prompt] * 2
+    prompt = [imagenet_label.refined_Label[label.item()] + " " + target_prompt] * 2 # label对应的物体描述（iPod）
     print("prompt generate: ", prompt[0], "\tlabels: ", pred_labels.cpu().numpy().tolist())
 
-    true_label = model.tokenizer.encode(imagenet_label.refined_Label[label.item()])
+    # 4. 获取标签文本编码（编码是确定的，不可训练的，能够恢复原始语言的）
+    #    而嵌入（embedding）则是会损失信息的，可训练的，不确定的内容，常见的有 Word2Vec、GloVe、BERT
+    true_label = model.tokenizer.encode(imagenet_label.refined_Label[label.item()]) # 标签编码
     target_label = model.tokenizer.encode(target_prompt)
     print("decoder: ", true_label, target_label)
 
@@ -257,14 +277,18 @@ def diffattack(
             === Details please refer to Appendix B ===
             ==========================================
     """
-    latent, inversion_latents = ddim_reverse_sample(image, prompt, model,
+    # 5. 通过DDIM获取图像到噪声的 n 步的加噪过程（就是逆向过程）
+    #    latent是加噪的最后一步得到的噪声潜空间，inversion_latents是所有噪声潜空间的集合
+    #    潜空间指的是通过vae.decode将图像降采样到一个潜空间
+    latent, inversion_latents = ddim_reverse_sample(image, prompt, model, # 逆向DDIM（加噪）
                                                     num_inference_steps,
                                                     0, res=height)
-    inversion_latents = inversion_latents[::-1]
+    inversion_latents = inversion_latents[::-1] # 逆转latents顺序
 
     init_prompt = [prompt[0]]
     batch_size = len(init_prompt)
-    latent = inversion_latents[start_step - 1]
+    latent = inversion_latents[start_step - 1] # 抽取一个加噪后的latents作为图像生成起始点
+    # inversion_latents[0] 是纯噪声端 inversion_latents[-1]是原图端
 
     """
             ===============================================================================
@@ -272,13 +296,15 @@ def diffattack(
             ======================= Details please refer to Section 3.4 ===================
             ===============================================================================
     """
+
+    # 6. 将空文本（无条件）编码为token然后再嵌入为embedding
     max_length = 77
-    uncond_input = model.tokenizer(
+    uncond_input = model.tokenizer( # 这是个什么玩意
         [""] * batch_size, padding="max_length", max_length=max_length, return_tensors="pt"
     )
-
     uncond_embeddings = model.text_encoder(uncond_input.input_ids.to(model.device))[0]
 
+    # 6. 将prompt 目标标签 编码为token然后再嵌入为embedding
     text_input = model.tokenizer(
         init_prompt,
         padding="max_length",
@@ -286,10 +312,11 @@ def diffattack(
         truncation=True,
         return_tensors="pt",
     )
-    text_embeddings = model.text_encoder(text_input.input_ids.to(model.device))[0]
+    text_embeddings = model.text_encoder(text_input.input_ids.to(model.device))[0] # 这又是什么玩意
 
+    # 初始化latents，就是更改了一下latent的大小（size），扩展了一下维度
     all_uncond_emb = []
-    latent, latents = init_latent(latent, model, height, width, batch_size)
+    latent, latents = init_latent(latent, model, height, width, batch_size) # latent, latents size相同 latent = size/8
 
     uncond_embeddings.requires_grad_(True)
     optimizer = optim.AdamW([uncond_embeddings], lr=1e-1)
@@ -298,8 +325,9 @@ def diffattack(
     context = torch.cat([uncond_embeddings, text_embeddings])
 
     #  The DDIM should begin from 1, as the inversion cannot access X_T but only X_{T-1}
+    # 7. 通过更新 uncond_embeddings 来确保拼合以后的 context 能够达成和 text_embeddings 类似的指导效果
     for ind, t in enumerate(tqdm(model.scheduler.timesteps[1 + start_step - 1:], desc="Optimize_uncond_embed")):
-        for _ in range(10 + 2 * ind):
+        for _ in range(10 + 2 * ind): # 迭代优化 k 次
             out_latents = diffusion_step(model, latents, context, t, guidance_scale)
             optimizer.zero_grad()
             loss = loss_func(out_latents, inversion_latents[start_step - 1 + ind + 1])
@@ -310,14 +338,16 @@ def diffattack(
             context = torch.cat(context)
 
         with torch.no_grad():
-            latents = diffusion_step(model, latents, context, t, guidance_scale).detach()
-            all_uncond_emb.append(uncond_embeddings.detach().clone())
+            latents = diffusion_step(model, latents, context, t, guidance_scale).detach() # 推进latents去噪一步（新方法）
+            all_uncond_emb.append(uncond_embeddings.detach().clone()) # 将优化过程中所有uncond_embedding保存下来
 
     """
             ==========================================
             ============ Latents Attack ==============
             ==== Details please refer to Section 3 ===
             ==========================================
+
+            这里的目标就是对latent进行优化, 让其去噪以后具备攻击能力
     """
 
     uncond_embeddings.requires_grad_(False)
@@ -325,7 +355,7 @@ def diffattack(
     register_attention_control(model, controller)
 
     batch_size = len(prompt)
-
+    # 8. 将 prompt 编码为 token 并获取其 embedding
     text_input = model.tokenizer(
         prompt,
         padding="max_length",
@@ -335,13 +365,15 @@ def diffattack(
     )
     text_embeddings = model.text_encoder(text_input.input_ids.to(model.device))[0]
 
+    # 9. 拼接 embedding
     context = [[torch.cat([all_uncond_emb[i]] * batch_size), text_embeddings] for i in range(len(all_uncond_emb))]
     context = [torch.cat(i) for i in context]
 
     original_latent = latent.clone()
 
-    latent.requires_grad_(True)
+    latent.requires_grad_(True) # 
 
+    # 10. 设置 latent 的优化器以及损失函数
     optimizer = optim.AdamW([latent], lr=1e-2)
     cross_entro = torch.nn.CrossEntropyLoss()
     init_image = preprocess(image, res)
@@ -355,15 +387,16 @@ def diffattack(
         init_mask = torch.ones([1, 1, *init_image.shape[-2:]]).cuda()
 
     pbar = tqdm(range(iterations), desc="Iterations")
-    for _, _ in enumerate(pbar):
+    for _, _ in enumerate(pbar): # attack iter
         controller.loss = 0
 
         #  The DDIM should begin from 1, as the inversion cannot access X_T but only X_{T-1}
         controller.reset()
-        latents = torch.cat([original_latent, latent])
+        latents = torch.cat([original_latent, latent]) # [2 4 28 28] original_latent = latent.clone()
         for ind, t in enumerate(model.scheduler.timesteps[1 + start_step - 1:]):
-            latents = diffusion_step(model, latents, context[ind], t, guidance_scale)
+            latents = diffusion_step(model, latents, context[ind], t, guidance_scale) # 经典的 DDIM 去噪
 
+        # aggregate：总；获取总注意力图 map before和after表示 [0] [1]
         before_attention_map = aggregate_attention(prompt, controller, 7, ("up", "down"), True, 0, is_cpu=False)
         after_attention_map = aggregate_attention(prompt, controller, 7, ("up", "down"), True, 1, is_cpu=False)
 
@@ -408,19 +441,20 @@ def diffattack(
 
         optimizer.zero_grad()
         loss.backward()
-        optimizer.step()
+        optimizer.step() # 优化latent
 
     with torch.no_grad():
         controller.loss = 0
         controller.reset()
 
-        latents = torch.cat([original_latent, latent])
+        latents = torch.cat([original_latent, latent]) # 原始 latent 和攻击优化后的 latent
 
+        # 通过优化后的 latent 生成图片 其中 original_latent 的加入是一个技巧
         for ind, t in enumerate(model.scheduler.timesteps[1 + start_step - 1:]):
             latents = diffusion_step(model, latents, context[ind], t, guidance_scale)
 
     out_image = model.vae.decode(1 / 0.18215 * latents.detach())['sample'][1:] * init_mask + (
-            1 - init_mask) * init_image
+            1 - init_mask) * init_image # 图像解码
     out_image = (out_image / 2 + 0.5).clamp(0, 1)
     out_image = out_image.permute(0, 2, 3, 1)
     mean = torch.as_tensor([0.485, 0.456, 0.406], dtype=out_image.dtype, device=out_image.device)
@@ -443,11 +477,11 @@ def diffattack(
             ==========================================
     """
 
-    image = latent2image(model.vae, latents.detach())
+    image = latent2image(model.vae, latents.detach()) # image from latents（simple of the up code）
 
-    real = (init_image / 2 + 0.5).clamp(0, 1).permute(0, 2, 3, 1).cpu().numpy()
+    real = (init_image / 2 + 0.5).clamp(0, 1).permute(0, 2, 3, 1).cpu().numpy() # real iamge
     perturbed = image[1:].astype(np.float32) / 255 * init_mask.squeeze().unsqueeze(-1).cpu().numpy() + (
-            1 - init_mask.squeeze().unsqueeze(-1).cpu().numpy()) * real
+            1 - init_mask.squeeze().unsqueeze(-1).cpu().numpy()) * real # 要通过mask只保留某个区域的扰动
     image = (perturbed * 255).astype(np.uint8)
     view_images(np.concatenate([real, perturbed]) * 255, show=False,
                 save_path=save_path + "_diff_{}_image_{}.png".format(model_name,

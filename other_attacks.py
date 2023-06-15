@@ -3,6 +3,7 @@ import torchvision.models as models
 import numpy as np
 import os
 
+from prettytable import PrettyTable
 from art.estimators.classification import PyTorchClassifier
 import timm
 from torch_nets import (
@@ -73,13 +74,17 @@ def model_selection(name):
     return model.cuda()
 
 
-def model_transfer(clean_img, adv_img, label, res, save_path=r"C:\Users\PC\Desktop\output", fid_path=None):
+def model_transfer(clean_img, adv_img, label, res, save_path=r"/home/DiffAttack/output", fid_path=None):
     log = open(os.path.join(save_path, "log.txt"), mode="w", encoding="utf-8")
+    # models_transfer_name = ["resnet", "vgg", "mobile", "inception", "convnext", "vit", "swin", 'deit-b', 'deit-s',
+    #                         'mixer-b', 'mixer-l', 'tf2torch_adv_inception_v3', 'tf2torch_ens3_adv_inc_v3',
+    #                         'tf2torch_ens4_adv_inc_v3', 'tf2torch_ens_adv_inc_res_v2']
     models_transfer_name = ["resnet", "vgg", "mobile", "inception", "convnext", "vit", "swin", 'deit-b', 'deit-s',
-                            'mixer-b', 'mixer-l', 'tf2torch_adv_inception_v3', 'tf2torch_ens3_adv_inc_v3',
-                            'tf2torch_ens4_adv_inc_v3', 'tf2torch_ens_adv_inc_res_v2']
+                            'mixer-b', 'mixer-l']
     all_clean_accuracy = []
     all_adv_accuracy = []
+    table = PrettyTable(["model", "acc org", "acc adv", "avg org", "avg adv"])
+
     for name in models_transfer_name:
         print("\n*********Transfer to {}********".format(name))
         print("\n*********Transfer to {}********".format(name), file=log)
@@ -111,12 +116,17 @@ def model_transfer(clean_img, adv_img, label, res, save_path=r"C:\Users\PC\Deskt
         print("Accuracy on adversarial examples: {}%".format(accuracy * 100), file=log)
         all_adv_accuracy.append(accuracy * 100)
 
-    print("clean_accuracy: ", "\t".join([str(x) for x in all_clean_accuracy]), file=log)
-    print("adv_accuracy: ", "\t".join([str(x) for x in all_adv_accuracy]), file=log)
+        table.add_row([name, "{:.2f}%".format(all_clean_accuracy[-1]), "{:.2f}%".format(all_adv_accuracy[-1]),
+                          "{:.2f}%".format(np.mean(all_clean_accuracy)), "{:.2f}%".format(np.mean(all_adv_accuracy))])
 
-    fid = fid_score.main(save_path if fid_path is None else fid_path)
-    print("\n*********fid: {}********".format(fid))
-    print("\n*********fid: {}********".format(fid), file=log)
+    print(table)
+    print(table, file=log)
+    # print("clean_accuracy: ", "\t".join([str(x) for x in all_clean_accuracy]), file=log)
+    # print("adv_accuracy: ", "\t".join([str(x) for x in all_adv_accuracy]), file=log)
+
+    # fid = fid_score.main(save_path if fid_path is None else fid_path)
+    # print("\n*********fid: {}********".format(fid))
+    # print("\n*********fid: {}********".format(fid), file=log)
 
     log.close()
 
