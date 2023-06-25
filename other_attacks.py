@@ -79,8 +79,9 @@ def model_transfer(clean_img, adv_img, label, res, save_path=r"/home/DiffAttack/
     # models_transfer_name = ["resnet", "vgg", "mobile", "inception", "convnext", "vit", "swin", 'deit-b', 'deit-s',
     #                         'mixer-b', 'mixer-l', 'tf2torch_adv_inception_v3', 'tf2torch_ens3_adv_inc_v3',
     #                         'tf2torch_ens4_adv_inc_v3', 'tf2torch_ens_adv_inc_res_v2']
-    models_transfer_name = ["resnet", "vgg", "mobile", "inception", "convnext", "vit", "swin", 'deit-b', 'deit-s',
-                            'mixer-b', 'mixer-l']
+    # models_transfer_name = ["resnet", "vgg", "mobile", "inception", "convnext", "vit", "swin", 'deit-b', 'deit-s',
+    #                         'mixer-b', 'mixer-l']
+    models_transfer_name = ["resnet", "vgg", "mobile", "inception", "convnext", "vit", "swin"]
     all_clean_accuracy = []
     all_adv_accuracy = []
     table = PrettyTable(["model", "acc org", "acc adv", "avg org", "avg adv"])

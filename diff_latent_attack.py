@@ -214,7 +214,7 @@ def latent2image(vae, latents):
 @torch.enable_grad()
 def diffattack(
         model,
-        label,
+        label, # 真实标签
         controller,
         num_inference_steps: int = 20,
         guidance_scale: float = 2.5,
@@ -230,9 +230,9 @@ def diffattack(
 ):
     label = torch.from_numpy(label).long().cuda() # 表情605
 
-    model.vae.requires_grad_(False)
-    model.text_encoder.requires_grad_(False)
-    model.unet.requires_grad_(False)
+    model.vae.requires_grad_(False) # vae用于将图像压缩到latent
+    model.text_encoder.requires_grad_(False) # text_encoder用于对文本进行编码
+    model.unet.requires_grad_(False) # unet用于加噪
 
     # 1. 获取代理模型（605）
     classifier = other_attacks.model_selection(model_name).eval()
@@ -250,25 +250,25 @@ def diffattack(
     test_image = test_image.transpose((2, 0, 1))
     test_image = torch.from_numpy(test_image).unsqueeze(0)
 
-    # 3. 代理模型预测（label就是一个长度，为啥要拿准确度呢）
+    # 3. 代理模型预测（label维度只有1，为啥要拿准确度呢）
     pred = classifier(test_image.cuda())
     pred_accuracy_clean = (torch.argmax(pred, 1).detach() == label).sum().item() / len(label)
     print("\nAccuracy on benign examples: {}%".format(pred_accuracy_clean * 100))
 
     logit = torch.nn.Softmax()(pred) # 得到预测的置信度logit
     print("gt_label:", label[0].item(), "pred_label:", torch.argmax(pred, 1).detach().item(), "pred_clean_logit",
-          logit[0, label[0]].item())
+          logit[0, label[0]].item()) # 展示预测内容索引 + 标签内容的置信度
 
     _, pred_labels = pred.topk(topN, largest=True, sorted=True)
 
-    target_prompt = " ".join([imagenet_label.refined_Label[label.item()] for i in range(1, topN)])
-    prompt = [imagenet_label.refined_Label[label.item()] + " " + target_prompt] * 2 # label对应的物体描述（iPod）
+    target_prompt = " ".join([imagenet_label.refined_Label[label.item()] for i in range(1, topN)]) # label对应的物体描述（iPod）
+    prompt = [imagenet_label.refined_Label[label.item()] + " " + target_prompt] * 2 # 将描述乘2
     print("prompt generate: ", prompt[0], "\tlabels: ", pred_labels.cpu().numpy().tolist())
 
     # 4. 获取标签文本编码（编码是确定的，不可训练的，能够恢复原始语言的）
     #    而嵌入（embedding）则是会损失信息的，可训练的，不确定的内容，常见的有 Word2Vec、GloVe、BERT
-    true_label = model.tokenizer.encode(imagenet_label.refined_Label[label.item()]) # 标签编码
-    target_label = model.tokenizer.encode(target_prompt)
+    true_label = model.tokenizer.encode(imagenet_label.refined_Label[label.item()]) # 真实标签 单个的编码
+    target_label = model.tokenizer.encode(target_prompt)    # 目标标签 多个的编码（中间含有单个的真实标签）
     print("decoder: ", true_label, target_label)
 
     """
@@ -277,17 +277,18 @@ def diffattack(
             === Details please refer to Appendix B ===
             ==========================================
     """
+
     # 5. 通过DDIM获取图像到噪声的 n 步的加噪过程（就是逆向过程）
     #    latent是加噪的最后一步得到的噪声潜空间，inversion_latents是所有噪声潜空间的集合
     #    潜空间指的是通过vae.decode将图像降采样到一个潜空间
     latent, inversion_latents = ddim_reverse_sample(image, prompt, model, # 逆向DDIM（加噪）
                                                     num_inference_steps,
                                                     0, res=height)
-    inversion_latents = inversion_latents[::-1] # 逆转latents顺序
+    inversion_latents = inversion_latents[::-1] # 逆转latents顺序，本来最前边的是清晰图，现在最前边是噪声图
 
-    init_prompt = [prompt[0]]
+    init_prompt = [prompt[0]] # 初始的指导文本，用于后期梯度优化
     batch_size = len(init_prompt)
-    latent = inversion_latents[start_step - 1] # 抽取一个加噪后的latents作为图像生成起始点
+    latent = inversion_latents[start_step - 1] # 抽取一个加噪后的latents作为图像生成起始点（start_step越大，噪声越小）
     # inversion_latents[0] 是纯噪声端 inversion_latents[-1]是原图端
 
     """
@@ -295,31 +296,33 @@ def diffattack(
             === Good initial reconstruction by optimizing the unconditional embeddings ====
             ======================= Details please refer to Section 3.4 ===================
             ===============================================================================
+
     """
 
     # 6. 将空文本（无条件）编码为token然后再嵌入为embedding
     max_length = 77
-    uncond_input = model.tokenizer( # 这是个什么玩意
+    uncond_input = model.tokenizer( # 和 model.tokenizer.encode 作用相同，不过这里给的是一个map，input_ids是和其相同的内容
         [""] * batch_size, padding="max_length", max_length=max_length, return_tensors="pt"
     )
-    uncond_embeddings = model.text_encoder(uncond_input.input_ids.to(model.device))[0]
+    uncond_embeddings = model.text_encoder(uncond_input.input_ids.to(model.device))[0] # 嵌入
 
     # 6. 将prompt 目标标签 编码为token然后再嵌入为embedding
+    #    tokenizer() 与 tokenizer.encode() 是进行编码的，text_encoder是进行嵌入的
     text_input = model.tokenizer(
-        init_prompt,
+        init_prompt, # 单个初始指导文本，用于后期梯度优化作为攻击源
         padding="max_length",
         max_length=model.tokenizer.model_max_length,
         truncation=True,
         return_tensors="pt",
     )
-    text_embeddings = model.text_encoder(text_input.input_ids.to(model.device))[0] # 这又是什么玩意
+    text_embeddings = model.text_encoder(text_input.input_ids.to(model.device))[0]
 
-    # 初始化latents，就是更改了一下latent的大小（size），扩展了一下维度
+    # 初始化latents，就是更改了一下latent的大小（size），扩展了一下维度（规范化而已，其实Latent已经是这么大了）
     all_uncond_emb = []
     latent, latents = init_latent(latent, model, height, width, batch_size) # latent, latents size相同 latent = size/8
 
     uncond_embeddings.requires_grad_(True)
-    optimizer = optim.AdamW([uncond_embeddings], lr=1e-1)
+    optimizer = optim.AdamW([uncond_embeddings], lr=1e-1) # 只对uncond_embeddings进行优化，也就是空文本的嵌入
     loss_func = torch.nn.MSELoss()
 
     context = torch.cat([uncond_embeddings, text_embeddings])
@@ -330,14 +333,14 @@ def diffattack(
         for _ in range(10 + 2 * ind): # 迭代优化 k 次
             out_latents = diffusion_step(model, latents, context, t, guidance_scale)
             optimizer.zero_grad()
-            loss = loss_func(out_latents, inversion_latents[start_step - 1 + ind + 1])
+            loss = loss_func(out_latents, inversion_latents[start_step - 1 + ind + 1]) # 拉近真实噪声和无条件噪声的距离，来优化uncond嵌入
             loss.backward()
             optimizer.step()
 
             context = [uncond_embeddings, text_embeddings]
             context = torch.cat(context)
 
-        with torch.no_grad():
+        with torch.no_grad(): # 相当于重复进行了一下上边的内容（但是为什么不直接用上边的呢？）
             latents = diffusion_step(model, latents, context, t, guidance_scale).detach() # 推进latents去噪一步（新方法）
             all_uncond_emb.append(uncond_embeddings.detach().clone()) # 将优化过程中所有uncond_embedding保存下来
 
@@ -351,10 +354,10 @@ def diffattack(
     """
 
     uncond_embeddings.requires_grad_(False)
-
-    register_attention_control(model, controller)
-
+    
+    register_attention_control(model, controller) # 注册控制器
     batch_size = len(prompt)
+
     # 8. 将 prompt 编码为 token 并获取其 embedding
     text_input = model.tokenizer(
         prompt,
@@ -371,14 +374,15 @@ def diffattack(
 
     original_latent = latent.clone()
 
-    latent.requires_grad_(True) # 
+    latent.requires_grad_(True) # 优化潜变量latent
 
     # 10. 设置 latent 的优化器以及损失函数
     optimizer = optim.AdamW([latent], lr=1e-2)
     cross_entro = torch.nn.CrossEntropyLoss()
     init_image = preprocess(image, res)
 
-    #  “Pseudo” Mask for better Imperceptibility, yet sacrifice the transferability. Details please refer to Appendix D.
+    # “Pseudo” Mask for better Imperceptibility, yet sacrifice the transferability. Details please refer to Appendix D.
+    # 11. 使用mask让攻击更加隐蔽，但是会牺牲可迁移性
     apply_mask = args.is_apply_mask
     hard_mask = args.is_hard_mask
     if apply_mask:
@@ -386,33 +390,38 @@ def diffattack(
     else:
         init_mask = torch.ones([1, 1, *init_image.shape[-2:]]).cuda()
 
+    # 12. 开始优化latent（主 攻击模块）
     pbar = tqdm(range(iterations), desc="Iterations")
     for _, _ in enumerate(pbar): # attack iter
         controller.loss = 0
 
         #  The DDIM should begin from 1, as the inversion cannot access X_T but only X_{T-1}
+        # 13. 从选定步数开始进行去噪，拿到去噪完成后的 latent
         controller.reset()
         latents = torch.cat([original_latent, latent]) # [2 4 28 28] original_latent = latent.clone()
         for ind, t in enumerate(model.scheduler.timesteps[1 + start_step - 1:]):
             latents = diffusion_step(model, latents, context[ind], t, guidance_scale) # 经典的 DDIM 去噪
 
         # aggregate：总；获取总注意力图 map before和after表示 [0] [1]
+        # 14. 获取注意力图像
         before_attention_map = aggregate_attention(prompt, controller, 7, ("up", "down"), True, 0, is_cpu=False)
         after_attention_map = aggregate_attention(prompt, controller, 7, ("up", "down"), True, 1, is_cpu=False)
-
         before_true_label_attention_map = before_attention_map[:, :, 1: len(true_label) - 1]
-
         after_true_label_attention_map = after_attention_map[:, :, 1: len(true_label) - 1]
 
+        # 15. 获取mask（根据注意力对象进行mask，注意力对象也是一个和潜变量图大小相同的，所以我们要扩大到原图大小）
         if init_mask is None:
-            init_mask = torch.nn.functional.interpolate((before_true_label_attention_map.detach().clone().mean(
-                -1) / before_true_label_attention_map.detach().clone().mean(-1).max()).unsqueeze(0).unsqueeze(0),
+            init_mask = torch.nn.functional.interpolate((before_true_label_attention_map.detach().clone().mean(-1) / 
+                                                         before_true_label_attention_map.detach().clone().mean(-1)
+                                                         .max()).unsqueeze(0).unsqueeze(0),
                                                         init_image.shape[-2:], mode="bilinear").clamp(0, 1)
             if hard_mask:
-                init_mask = init_mask.gt(0.5).float()
-        init_out_image = model.vae.decode(1 / 0.18215 * latents)['sample'][1:] * init_mask + (
-                1 - init_mask) * init_image
+                init_mask = init_mask.gt(0.5).float() # 大于0.5都为1，小于0.5都是0
 
+
+        # 16. 对获取到的图像进行逆处理得到最终的图像
+        init_out_image = model.vae.decode(1 / 0.18215 * latents)['sample'][1:] * init_mask + (
+                1 - init_mask) * init_image # 噪声潜变量 加上 原始图像（要用mask区分区域）
         out_image = (init_out_image / 2 + 0.5).clamp(0, 1)
         out_image = out_image.permute(0, 2, 3, 1)
         mean = torch.as_tensor([0.485, 0.456, 0.406], dtype=out_image.dtype, device=out_image.device)
@@ -420,16 +429,18 @@ def diffattack(
         out_image = out_image[:, :, :].sub(mean).div(std)
         out_image = out_image.permute(0, 3, 1, 2)
 
+        # 17. 使用target模型对生成的图像进行预测，并将其和真实标签做交叉熵，拉大差距
         pred = classifier(out_image)
 
+        # 18. 损失函数构成
+        # 攻击损失1，让预测结果不准
         attack_loss = - cross_entro(pred, label) * args.attack_loss_weight
-
-        # “Deceive” Strong Diffusion Model. Details please refer to Section 3.3
+        # “Deceive” Strong Diffusion Model. Details please refer to Section 3.3 
+        # 攻击损失2，让注意力图像的方差变大，让注意力关注全局（本来只关注text对应的部分）
         variance_cross_attn_loss = after_true_label_attention_map.var() * args.cross_attn_loss_weight
-
         # Preserve Content Structure. Details please refer to Section 3.4
-        self_attn_loss = controller.loss * args.self_attn_loss_weight
-
+        # 攻击损失3，控制语义损失不要过大（让加了扰动和没加扰动的图像的自注意力图拉近）
+        self_attn_loss = controller.loss * args.self_attn_loss_weight 
         loss = self_attn_loss + attack_loss + variance_cross_attn_loss
 
         if verbose:
@@ -453,6 +464,7 @@ def diffattack(
         for ind, t in enumerate(model.scheduler.timesteps[1 + start_step - 1:]):
             latents = diffusion_step(model, latents, context[ind], t, guidance_scale)
 
+    # 19. 生成最终的图像，并进行处理
     out_image = model.vae.decode(1 / 0.18215 * latents.detach())['sample'][1:] * init_mask + (
             1 - init_mask) * init_image # 图像解码
     out_image = (out_image / 2 + 0.5).clamp(0, 1)
@@ -462,14 +474,16 @@ def diffattack(
     out_image = out_image[:, :, :].sub(mean).div(std)
     out_image = out_image.permute(0, 3, 1, 2)
 
+    # 20. 得到最终图像的准确度
     pred = classifier(out_image)
     pred_label = torch.argmax(pred, 1).detach()
     pred_accuracy = (torch.argmax(pred, 1).detach() == label).sum().item() / len(label)
     print("Accuracy on adversarial examples: {}%".format(pred_accuracy * 100))
 
-    logit = torch.nn.Softmax()(pred)
-    print("after_pred:", pred_label, logit[0, pred_label[0]])
-    print("after_true:", label, logit[0, label[0]])
+
+    logit = torch.nn.Softmax()(pred) # 置信度
+    print("after_pred:", pred_label, logit[0, pred_label[0]]) # 预测的标签以及其置信度
+    print("after_true:", label, logit[0, label[0]])           # 真实的标签以及其置信度
 
     """
             ==========================================
@@ -477,6 +491,7 @@ def diffattack(
             ==========================================
     """
 
+    # 21. 不加入mask的图像
     image = latent2image(model.vae, latents.detach()) # image from latents（simple of the up code）
 
     real = (init_image / 2 + 0.5).clamp(0, 1).permute(0, 2, 3, 1).cpu().numpy() # real iamge

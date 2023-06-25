@@ -95,7 +95,7 @@ class AttentionControlEdit(AttentionStore, abc.ABC):
         if is_cross or (self.num_self_replace[0] <= self.cur_step < self.num_self_replace[1]):
             h = attn.shape[0] // (self.batch_size)
             attn = attn.reshape(self.batch_size, h, *attn.shape[1:])
-            attn_base, attn_repalce = attn[0], attn[1:]
+            attn_base, attn_repalce = attn[0], attn[1:] # 原图的自注意力 + 修改后的图的自注意力
             if not is_cross:
                 """
                         ==========================================
@@ -103,7 +103,7 @@ class AttentionControlEdit(AttentionStore, abc.ABC):
                         === Details please refer to Section 3.4 ==
                         ==========================================
 
-                        对自注意力进行控制，使其生成结果不会很违和
+                        对自注意力进行控制，使其生成结果不会很违和（拉近原图和修改后的图的自注意力）
                 """
                 self.loss += self.criterion(attn[1:], self.replace_self_attention(attn_base, attn_repalce))
             attn = attn.reshape(self.batch_size * h, *attn.shape[2:])

@@ -20,7 +20,7 @@ parser.add_argument('--images_root', default=r"/home/DiffAttack/demo/images", ty
                     help='The clean images root directory')
 parser.add_argument('--label_path', default=r"/home/DiffAttack/demo/labels.txt", type=str,
                     help='The clean images labels.txt')
-parser.add_argument('--is_test', default=True, type=bool,
+parser.add_argument('--is_test', default=False, type=bool,
                     help='Whether to test the robustness of the generated adversarial examples')
 parser.add_argument('--pretrained_diffusion_path',
                     default=r"stabilityai/stable-diffusion-2-base",
@@ -31,7 +31,7 @@ parser.add_argument('--diffusion_steps', default=20, type=int, help='Total DDIM 
 parser.add_argument('--start_step', default=15, type=int, help='Which DDIM step to start the attack')
 parser.add_argument('--iterations', default=30, type=int, help='Iterations of optimizing the adv_image')
 parser.add_argument('--res', default=224, type=int, help='Input image resized resolution')
-parser.add_argument('--model_name', default="resnet50", type=str,
+parser.add_argument('--model_name', default="resnet", type=str,
                     help='The surrogate model from which the adversarial examples are crafted')
 parser.add_argument('--is_apply_mask', default=False, type=bool,
                     help='Whether to leverage pseudo mask for better imperceptibility (See Appendix D)')
@@ -73,7 +73,6 @@ def run_diffusion_attack(image, label, diffusion_model, diffusion_steps, guidanc
                                                                   save_path=save_dir, res=res, model_name=model_name,
                                                                   start_step=start_step,
                                                                   iterations=iterations, args=args)
-
     return adv_image, clean_acc, adv_acc
 
 
