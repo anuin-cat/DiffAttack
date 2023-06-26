@@ -2,6 +2,11 @@ import torch.nn as nn
 import torchvision.models as models
 import numpy as np
 import os
+import torchvision.transforms as transforms
+import torch
+
+# 导入dataloader
+from torch.utils.data import DataLoader
 
 from prettytable import PrettyTable
 from art.estimators.classification import PyTorchClassifier
@@ -79,9 +84,9 @@ def model_transfer(clean_img, adv_img, label, res, save_path=r"/home/DiffAttack/
     # models_transfer_name = ["resnet", "vgg", "mobile", "inception", "convnext", "vit", "swin", 'deit-b', 'deit-s',
     #                         'mixer-b', 'mixer-l', 'tf2torch_adv_inception_v3', 'tf2torch_ens3_adv_inc_v3',
     #                         'tf2torch_ens4_adv_inc_v3', 'tf2torch_ens_adv_inc_res_v2']
-    # models_transfer_name = ["resnet", "vgg", "mobile", "inception", "convnext", "vit", "swin", 'deit-b', 'deit-s',
-    #                         'mixer-b', 'mixer-l']
-    models_transfer_name = ["resnet", "vgg", "mobile", "inception", "convnext", "vit", "swin"]
+    models_transfer_name = ["resnet", "vgg", "mobile", "inception", "convnext", "vit", "swin", 'deit-b', 'deit-s',
+                            'mixer-b', 'mixer-l']
+    # models_transfer_name = ["resnet", "vgg", "mobile", "inception", "convnext", "vit", "swin"]
     all_clean_accuracy = []
     all_adv_accuracy = []
     table = PrettyTable(["model", "acc org", "acc adv", "avg org", "avg adv"])
@@ -131,3 +136,62 @@ def model_transfer(clean_img, adv_img, label, res, save_path=r"/home/DiffAttack/
 
     log.close()
 
+
+
+
+def model_transfer_full(res, dataset, adv_dataset, save_path=r"/home/DiffAttack/output_full", fid_path=None):
+
+    # 1. 参数设置
+    log = open(os.path.join(save_path, "log.txt"), mode="w", encoding="utf-8")
+    models_transfer_name = ["resnet", "vgg", "mobile", "inception", "convnext", 
+                            "vit", "swin", 'deit-b', 'deit-s','mixer-b', 'mixer-l']
+    
+    all_clean_accuracy = []
+    all_adv_accuracy = []
+    table = PrettyTable(["model", "acc org", "acc adv", "avg org", "avg adv"])
+
+    transfers = transforms.Compose([
+        transforms.Resize((res, res)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+    adv_dataset.transforms = transfers
+    dataset.transforms = transfers
+
+    dataloader = DataLoader(dataset, batch_size=50, shuffle=False, num_workers=10)
+    adv_dataloader = DataLoader(adv_dataset, batch_size=50, shuffle=False, num_workers=10)
+
+
+    # 2. 使用不同的模型进行测试
+    for name in models_transfer_name:
+        print("\n*********Transfer to {}********".format(name))
+        accuracy = 0
+        adv_accuracy = 0
+
+        for image, imageId, label_index, label in dataloader:
+            model = model_selection(name)
+            model.eval()
+            pred = model(image.cuda()).cpu().detach().numpy()
+            accuracy += np.sum(np.argmax(pred, axis=1) == label_index.numpy())
+
+        for image, imageId, label_index, label in adv_dataloader:
+            model = model_selection(name)
+            model.eval()
+            pred = model(image.cuda()).cpu().detach().numpy()
+            adv_accuracy += np.sum(np.argmax(pred, axis=1) == label_index.numpy())
+
+        accuracy = accuracy / len(dataset) * 100
+        adv_accuracy = adv_accuracy / len(adv_dataset) * 100
+        print("Accuracy on benign examples: {:.2f}%".format(accuracy))
+        print("Accuracy on adversarial examples: {:.2f}%".format(adv_accuracy))
+
+        all_clean_accuracy.append(accuracy)
+        all_adv_accuracy.append(adv_accuracy)
+
+        table.add_row([name, "{:.2f}%".format(accuracy), "{:.2f}%".format(adv_accuracy),
+                       "{:.2f}%".format(np.mean(all_clean_accuracy)), "{:.2f}%".format(np.mean(all_adv_accuracy))])
+
+    print(table)
+    print(table, file=log)
+
+    log.close()

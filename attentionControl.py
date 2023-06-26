@@ -80,6 +80,8 @@ class AttentionStore(AttentionControl):
 
 
 class AttentionControlEdit(AttentionStore, abc.ABC):
+    # Unet 中所有 CrossAttention 操作中的forward都会调用这里边的forward函数 
+    # 具体可查看 diff_latent_attack 中的 register_attention_control 函数
     def __init__(self, num_steps: int,
                  self_replace_steps: Union[float, Tuple[float, float]]):
         super(AttentionControlEdit, self).__init__()
@@ -95,7 +97,8 @@ class AttentionControlEdit(AttentionStore, abc.ABC):
         if is_cross or (self.num_self_replace[0] <= self.cur_step < self.num_self_replace[1]):
             h = attn.shape[0] // (self.batch_size)
             attn = attn.reshape(self.batch_size, h, *attn.shape[1:])
-            attn_base, attn_repalce = attn[0], attn[1:] # 原图的自注意力 + 修改后的图的自注意力
+            # 原图的注意力 + 修改后的图的注意力（自注意力和交叉注意力共享一个变量）
+            attn_base, attn_repalce = attn[0], attn[1:]
             if not is_cross:
                 """
                         ==========================================

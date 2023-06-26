@@ -85,7 +85,6 @@ def ddim_reverse_sample(image, prompt, model, num_inference_steps: int = 20, gui
         next_timestep = t + model.scheduler.config.num_train_timesteps // model.scheduler.num_inference_steps
         alpha_bar_next = model.scheduler.alphas_cumprod[next_timestep] \
             if next_timestep <= model.scheduler.config.num_train_timesteps else torch.tensor(0.0) # alphas_cumprod就是alpha_bar
-            
 
         "leverage reversed_x0" # 其实就是那个公式
         reverse_x0 = (1 / torch.sqrt(model.scheduler.alphas_cumprod[t]) * (
@@ -112,7 +111,7 @@ def register_attention_control(model, controller):
             k = self.reshape_heads_to_batch_dim(k)
             v = self.reshape_heads_to_batch_dim(v)
 
-            sim = torch.einsum("b i d, b j d -> b i j", q, k) * self.scale
+            sim = torch.einsum("b i d, b j d -> b i j", q, k) * self.scale # 爱因斯坦求和约定，更方便点积
 
             attn = sim.softmax(dim=-1)
             attn = controller(attn, is_cross, place_in_unet)
@@ -404,6 +403,7 @@ def diffattack(
 
         # aggregate：总；获取总注意力图 map before和after表示 [0] [1]
         # 14. 获取注意力图像
+        #     after 表示攻击以后，before 表示原图的注意力图像
         before_attention_map = aggregate_attention(prompt, controller, 7, ("up", "down"), True, 0, is_cpu=False)
         after_attention_map = aggregate_attention(prompt, controller, 7, ("up", "down"), True, 1, is_cpu=False)
         before_true_label_attention_map = before_attention_map[:, :, 1: len(true_label) - 1]
@@ -437,10 +437,10 @@ def diffattack(
         attack_loss = - cross_entro(pred, label) * args.attack_loss_weight
         # “Deceive” Strong Diffusion Model. Details please refer to Section 3.3 
         # 攻击损失2，让注意力图像的方差变大，让注意力关注全局（本来只关注text对应的部分）
-        variance_cross_attn_loss = after_true_label_attention_map.var() * args.cross_attn_loss_weight
+        variance_cross_attn_loss = after_true_label_attention_map.var() * args.cross_attn_loss_weight * 0.1
         # Preserve Content Structure. Details please refer to Section 3.4
         # 攻击损失3，控制语义损失不要过大（让加了扰动和没加扰动的图像的自注意力图拉近）
-        self_attn_loss = controller.loss * args.self_attn_loss_weight 
+        self_attn_loss = controller.loss * args.self_attn_loss_weight
         loss = self_attn_loss + attack_loss + variance_cross_attn_loss
 
         if verbose:

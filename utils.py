@@ -3,7 +3,17 @@ import torch
 from PIL import Image
 import cv2
 from typing import Tuple
+import imagenet_label
+# 导入transforms
+from torchvision.transforms import transforms
 
+import os
+import torch
+from torch.utils.data import DataLoader
+import torch.nn as nn
+from PIL import Image
+from torch.utils import data
+import pandas as pd
 
 def aggregate_attention(prompts, attention_store, res: int, from_where, is_cross: bool, select: int, is_cpu=True):
     out = []
@@ -98,3 +108,52 @@ def view_images(images, num_rows=1, offset_ratio=0.02, save_path=None, show=Fals
         pil_img.show()
     if save_path is not None:
         pil_img.save(save_path)
+
+
+class ImageNet(data.Dataset):
+    def __init__(self, dir, csv_path, transforms=None):
+        self.dir = dir
+        self.csv = pd.read_csv(csv_path)
+        self.transforms = transforms
+
+    def __getitem__(self, index):
+        img_obj = self.csv.loc[index]
+        ImageID = img_obj['ImageId']
+        label_index = img_obj['TrueLabel'] - 1
+        TargetClass = img_obj['TargetClass'] - 1
+        label = imagenet_label.refined_Label.get(label_index)
+
+        img_path = os.path.join(self.dir, ImageID+'.png')
+        pil_img = Image.open(img_path).convert('RGB')
+        if self.transforms:
+            data = self.transforms(pil_img)
+        else:
+            data = transforms.ToTensor()(pil_img)
+        return data, ImageID, label_index, label
+
+    def __len__(self):
+        return len(self.csv)
+
+class AdvImageNet(data.Dataset):
+    def __init__(self, dir, csv_path, transforms=None):
+        self.dir = dir
+        self.csv = pd.read_csv(csv_path)
+        self.transforms = transforms
+
+    def __getitem__(self, index):
+        img_obj = self.csv.loc[index]
+        ImageID = img_obj['ImageId']
+        label_index = img_obj['TrueLabel'] - 1
+        TargetClass = img_obj['TargetClass'] - 1
+        label = imagenet_label.refined_Label.get(label_index)
+
+        img_path = os.path.join(self.dir, ImageID + '_adv_image.png')
+        pil_img = Image.open(img_path).convert('RGB')
+        if self.transforms:
+            data = self.transforms(pil_img)
+        else:
+            data = transforms.ToTensor()(pil_img)
+        return data, ImageID, label_index, label
+
+    def __len__(self):
+        return len(self.csv)
