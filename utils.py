@@ -18,14 +18,17 @@ import pandas as pd
 def aggregate_attention(prompts, attention_store, res: int, from_where, is_cross: bool, select: int, is_cpu=True):
     out = []
     attention_maps = attention_store.get_average_attention()
-    num_pixels = res ** 2
-    for location in from_where:
+    num_pixels = res ** 2 # 7^2 = 49
+    for location in from_where: 
+        # up, down
         for item in attention_maps[f"{location}_{'cross' if is_cross else 'self'}"]:
+            # up_cross 40 49 77, down_cross 20 196 196
+            # 这里只过滤到了 up_cross 没有保留 down_cross
             if item.shape[1] == num_pixels:
                 cross_maps = item.reshape(len(prompts), -1, res, res, item.shape[-1])[select]
-                out.append(cross_maps)
-    out = torch.cat(out, dim=0)
-    out = out.sum(0) / out.shape[0]
+                out.append(cross_maps) # 20 7 7 77 拿到一半
+    out = torch.cat(out, dim=0) # 100 7 7 77
+    out = out.sum(0) / out.shape[0] # 7 7 77 就是拿到了所有的注意力并且平均了一下
     return out.cpu() if is_cpu else out
 
 

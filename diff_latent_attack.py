@@ -102,24 +102,27 @@ def register_attention_control(model, controller):
     def ca_forward(self, place_in_unet):
 
         def forward(x, context=None):
-            q = self.to_q(x)
+            # x原本是4 4 28 28 -> 4 4 784 因为要先做一个卷积，通道增大所以 4 变成了 320 -> 4 784 320
+            # x : 4 784 320
+            # context : 4 784 320
+            q = self.to_q(x) # 4 784 320 （就是换了个shape，数据量没变）
             is_cross = context is not None
-            context = context if is_cross else x
-            k = self.to_k(context)
-            v = self.to_v(context)
-            q = self.reshape_heads_to_batch_dim(q)
-            k = self.reshape_heads_to_batch_dim(k)
-            v = self.reshape_heads_to_batch_dim(v)
+            context = context if is_cross else x # 4 784 320 | 4 77 1024
+            k = self.to_k(context) # 4 784 320 | 4 77 320
+            v = self.to_v(context) # 4 784 320 | 4 77 320
+            q = self.reshape_heads_to_batch_dim(q) # 20 784 64
+            k = self.reshape_heads_to_batch_dim(k) # 20 784 64 | 20 77 64
+            v = self.reshape_heads_to_batch_dim(v) # 20 784 64 | 20 77 64
 
-            sim = torch.einsum("b i d, b j d -> b i j", q, k) * self.scale # 爱因斯坦求和约定，更方便点积
+            sim = torch.einsum("b i d, b j d -> b i j", q, k) * self.scale # 20 784 784 | 20 784 77（爱因斯坦求和）
 
-            attn = sim.softmax(dim=-1)
-            attn = controller(attn, is_cross, place_in_unet)
-            out = torch.einsum("b i j, b j d -> b i d", attn, v)
-            out = self.reshape_batch_dim_to_heads(out)
+            attn = sim.softmax(dim=-1) # 20 784 784 | 20 784 77
+            attn = controller(attn, is_cross, place_in_unet) # 20 784 784 | 20 784 77
+            out = torch.einsum("b i j, b j d -> b i d", attn, v) # 20 784 64
+            out = self.reshape_batch_dim_to_heads(out) # 4 784 320
 
-            out = self.to_out[0](out)
-            out = self.to_out[1](out)
+            out = self.to_out[0](out) # 4 784 320
+            out = self.to_out[1](out) # 4 784 320
             return out
 
         return forward
@@ -193,7 +196,8 @@ def init_latent(latent, model, height, width, batch_size):
 
 
 def diffusion_step(model, latents, context, t, guidance_scale):
-    latents_input = torch.cat([latents] * 2)
+    latents_input = torch.cat([latents] * 2) # 4 4 28 28 -> 4 4 784
+    # context：4 77 1024
     noise_pred = model.unet(latents_input, t, encoder_hidden_states=context)["sample"]
     noise_pred_uncond, noise_prediction_text = noise_pred.chunk(2)
     noise_pred = noise_pred_uncond + guidance_scale * (noise_prediction_text - noise_pred_uncond)
@@ -287,23 +291,26 @@ def diffattack(
 
     init_prompt = [prompt[0]] # 初始的指导文本，用于后期梯度优化
     batch_size = len(init_prompt)
-    latent = inversion_latents[start_step - 1] # 抽取一个加噪后的latents作为图像生成起始点（start_step越大，噪声越小）
+    # 抽取一个加噪后的latents作为图像生成起始点（start_step越大，噪声越小）
     # inversion_latents[0] 是纯噪声端 inversion_latents[-1]是原图端
+    latent = inversion_latents[start_step - 1]  # 1 4 28 28
+    
 
     """
             ===============================================================================
             === Good initial reconstruction by optimizing the unconditional embeddings ====
             ======================= Details please refer to Section 3.4 ===================
             ===============================================================================
-
     """
 
     # 6. 将空文本（无条件）编码为token然后再嵌入为embedding
+    #    我们可以通过 tokenizer.pad_token_id 得到填充的内容是什么，进而得到真实编码的长度是多少
+    #    后边的真实标签的注意力的选取似乎也和这个有关系
     max_length = 77
     uncond_input = model.tokenizer( # 和 model.tokenizer.encode 作用相同，不过这里给的是一个map，input_ids是和其相同的内容
         [""] * batch_size, padding="max_length", max_length=max_length, return_tensors="pt"
-    )
-    uncond_embeddings = model.text_encoder(uncond_input.input_ids.to(model.device))[0] # 嵌入
+    ) # 1 77
+    uncond_embeddings = model.text_encoder(uncond_input.input_ids.to(model.device))[0] # 嵌入 1 77 1024
 
     # 6. 将prompt 目标标签 编码为token然后再嵌入为embedding
     #    tokenizer() 与 tokenizer.encode() 是进行编码的，text_encoder是进行嵌入的
@@ -340,6 +347,7 @@ def diffattack(
             context = torch.cat(context)
 
         with torch.no_grad(): # 相当于重复进行了一下上边的内容（但是为什么不直接用上边的呢？）
+            # 这里有点疑惑，为什么要分批存储，并且在下边攻击的时候分批使用（难道是不同阶段对无条件嵌入的依赖极强？）
             latents = diffusion_step(model, latents, context, t, guidance_scale).detach() # 推进latents去噪一步（新方法）
             all_uncond_emb.append(uncond_embeddings.detach().clone()) # 将优化过程中所有uncond_embedding保存下来
 
@@ -364,14 +372,16 @@ def diffattack(
         max_length=model.tokenizer.model_max_length,
         truncation=True,
         return_tensors="pt",
-    )
-    text_embeddings = model.text_encoder(text_input.input_ids.to(model.device))[0]
+    ) # 2 77
+    text_embeddings = model.text_encoder(text_input.input_ids.to(model.device))[0] # 2 77 1024
 
     # 9. 拼接 embedding
+    #    将前边得到的 uncond_embeddings * 2 和 text_embeddings 拼接起来（一共有5个 uncond_embeddings，所以拼五份）
+    #    因为 text_embeddings 是 2 77 1024，所以两者拼接以后为 4 77 1024
     context = [[torch.cat([all_uncond_emb[i]] * batch_size), text_embeddings] for i in range(len(all_uncond_emb))]
-    context = [torch.cat(i) for i in context]
+    context = [torch.cat(i) for i in context] # [4, 77, 1024] * 5
 
-    original_latent = latent.clone()
+    original_latent = latent.clone() # 1 4 28 28
 
     latent.requires_grad_(True) # 优化潜变量latent
 
@@ -399,24 +409,26 @@ def diffattack(
         controller.reset()
         latents = torch.cat([original_latent, latent]) # [2 4 28 28] original_latent = latent.clone()
         for ind, t in enumerate(model.scheduler.timesteps[1 + start_step - 1:]):
+            # 循环中 controller 被一同执行获取到 Unet 中的注意力图
             latents = diffusion_step(model, latents, context[ind], t, guidance_scale) # 经典的 DDIM 去噪
 
         # aggregate：总；获取总注意力图 map before和after表示 [0] [1]
         # 14. 获取注意力图像
         #     after 表示攻击以后，before 表示原图的注意力图像
-        before_attention_map = aggregate_attention(prompt, controller, 7, ("up", "down"), True, 0, is_cpu=False)
-        after_attention_map = aggregate_attention(prompt, controller, 7, ("up", "down"), True, 1, is_cpu=False)
-        before_true_label_attention_map = before_attention_map[:, :, 1: len(true_label) - 1]
-        after_true_label_attention_map = after_attention_map[:, :, 1: len(true_label) - 1]
+        #     这里取 before_true_label_attention_map 时只取中间部分可能是因为取完的话导致效果太极端
+        before_attention_map = aggregate_attention(prompt, controller, 7, ("up", "down"), True, 0, is_cpu=False) # 7 7 77
+        after_attention_map = aggregate_attention(prompt, controller, 7, ("up", "down"), True, 1, is_cpu=False) # 7 7 77
+        before_true_label_attention_map = before_attention_map[:, :, 1: len(true_label) - 1] # 难道和嵌入长度有关
+        after_true_label_attention_map = after_attention_map[:, :, 1: len(true_label) - 1] # 7 7 2 最后一个维度表示每个嵌入对图像的注意力，所以后边空嵌入就没意义了
 
         # 15. 获取mask（根据注意力对象进行mask，注意力对象也是一个和潜变量图大小相同的，所以我们要扩大到原图大小）
-        if init_mask is None:
-            init_mask = torch.nn.functional.interpolate((before_true_label_attention_map.detach().clone().mean(-1) / 
-                                                         before_true_label_attention_map.detach().clone().mean(-1)
-                                                         .max()).unsqueeze(0).unsqueeze(0),
-                                                        init_image.shape[-2:], mode="bilinear").clamp(0, 1)
-            if hard_mask:
-                init_mask = init_mask.gt(0.5).float() # 大于0.5都为1，小于0.5都是0
+        # if init_mask is None:
+        #     init_mask = torch.nn.functional.interpolate((before_true_label_attention_map.detach().clone().mean(-1) / 
+        #                                                  before_true_label_attention_map.detach().clone().mean(-1)
+        #                                                  .max()).unsqueeze(0).unsqueeze(0),
+        #                                                 init_image.shape[-2:], mode="bilinear").clamp(0, 1)
+        #     if hard_mask:
+        #         init_mask = init_mask.gt(0.5).float() # 大于0.5都为1，小于0.5都是0
 
 
         # 16. 对获取到的图像进行逆处理得到最终的图像
@@ -437,11 +449,12 @@ def diffattack(
         attack_loss = - cross_entro(pred, label) * args.attack_loss_weight
         # “Deceive” Strong Diffusion Model. Details please refer to Section 3.3 
         # 攻击损失2，让注意力图像的方差变大，让注意力关注全局（本来只关注text对应的部分）
-        variance_cross_attn_loss = after_true_label_attention_map.var() * args.cross_attn_loss_weight * 0.1
+        variance_cross_attn_loss = after_true_label_attention_map.mean() * args.cross_attn_loss_weight * 0.1
         # Preserve Content Structure. Details please refer to Section 3.4
         # 攻击损失3，控制语义损失不要过大（让加了扰动和没加扰动的图像的自注意力图拉近）
         self_attn_loss = controller.loss * args.self_attn_loss_weight
         loss = self_attn_loss + attack_loss + variance_cross_attn_loss
+        # loss = self_attn_loss + variance_cross_attn_loss
 
         if verbose:
             pbar.set_postfix_str(
