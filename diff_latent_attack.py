@@ -17,7 +17,6 @@ def preprocess(image, res=512):
     image = torch.from_numpy(image)[:, :3, :, :].cuda()
     return 2.0 * image - 1.0
 
-
 def encoder(image, model, res=512):
     generator = torch.Generator().manual_seed(8888)
     image = preprocess(image, res)
